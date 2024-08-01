@@ -1,49 +1,50 @@
 import logging
 import os
 import io
+import tempfile
+import re
+import requests
+
 import librosa
 import soundfile as sf
-from openai import AsyncOpenAI
-import openai
-from dotenv import load_dotenv
-from telegram import Update, __version__ as TG_VER
-from telegram.ext import filters, MessageHandler, ApplicationBuilder, CommandHandler, ContextTypes
-from pymongo.mongo_client import MongoClient
 import speech_recognition as sr
 import boto3
-from pydub import AudioSegment
-import tempfile
-from transformers import DetrImageProcessor, DetrForObjectDetection
-from PIL import Image
+import pytesseract
+import stripe
 import torch
 import cv2
-from fer import FER
-import requests
-from transformers import BlipProcessor, BlipForConditionalGeneration
-from io import BytesIO
-from telegram.ext import CallbackContext
-import concurrent.futures
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-import pytesseract
-import re
-import time
-import random
-from selenium.webdriver.support.ui import WebDriverWait
+
+from PIL import Image
+from pydub import AudioSegment
 from bs4 import BeautifulSoup
+from langdetect import detect
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 import nltk
-from langdetect import detect
+
+from transformers import DetrImageProcessor, DetrForObjectDetection, BlipProcessor, BlipForConditionalGeneration
+from openai import AsyncOpenAI
+from pymongo.mongo_client import MongoClient
+
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler
+)
+
+from flask import Flask, request, abort
+
+from fer import FER
+
+
 
 # Ensure that NLTK resources are downloaded
 nltk.download('punkt')
 nltk.download('stopwords')
 nltk.download('wordnet')
 
-
+stripe.api_key = os.getenv("STRIPE_API_KEY")
 
 
 
@@ -71,6 +72,7 @@ uri = os.getenv("MONGO_DB_URI")
 mongo_client = MongoClient(uri)
 db = mongo_client.get_database("telegram_bot")
 conversation_collection = db.get_collection("conversations")
+users_collection = db.get_collection("users")
 
 # Initialize traffic metrics
 message_count = 0
@@ -188,37 +190,38 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # Example URL extraction and chat message processing function
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
     user_message = update.message.text
+    user_id = update.message.from_user.id
 
-    if user_id not in user_message_count:
-        user_message_count[user_id] = 0
+    try:
+        # Extract URLs from the user message
+        urls = extract_urls(user_message)
 
-    user_message_count[user_id] += 1
-    global message_count
-    message_count += 1
+        print("EXTRACTED URLS")
+        print(urls)
 
-    logging.info(f"User {user_id} sent message: '{user_message}'. Total messages: {message_count}")
+        summary = None  # Initialize summary with None
 
-    # Extract URLs from the user message
-    urls = extract_urls(user_message)
+        if urls:
+            logging.info(f"Extracted URLs: {urls}")
+            try:
+                # Attempt to process each URL and extract summary
+                summaries = [await extract_text_html(url) for url in urls]
+                summary = " ".join(summaries)
+            except Exception as e:
+                logging.error(f"Error processing URLs: {e}", exc_info=True)
+                summary = "Error processing URLs."
 
-    print("EXTRACTED URLS")
-    print(urls)
+        # Create the GPT-3 prompt, including any URL information if needed
+        gpt3_prompt = f"User message: {user_message}\nExtracted URLs: {', '.join(urls) if urls else 'None'} mit folgendem Inhalt {summary}"
 
+        # Get the response from GPT-3
+        gpt3_response = await chat_with_gpt3(user_id, gpt3_prompt)
+        await update.message.reply_text(gpt3_response)
 
-    if urls:
-        logging.info(f"Extracted URLs: {urls}")
-
-        for url in urls:
-            summary = await extract_text_html(url)
-
-    # Create the GPT-3 prompt, including any URL information if needed
-    gpt3_prompt = f"User message: {user_message}\nExtracted URLs: {', '.join(urls) if urls else 'None'} mit folgendem Inhalt {summary}"
-
-    # Get the response from GPT-3
-    gpt3_response = await chat_with_gpt3(user_id, gpt3_prompt)
-    await update.message.reply_text(gpt3_response)
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}", exc_info=True)
+        await update.message.reply_text("An unexpected error occurred while processing your message. Please try again.")
 
 ## Function to recognize speech from voice file
 def recognize_speech(voice_file):
@@ -247,13 +250,22 @@ async def send_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     polly_client = boto3.client('polly', region_name='us-east-1')
 
+    # Detect the language of the text
+    detected_language = detect(text)
+    if detected_language == 'en':
+        voice_id = 'Joanna'
+        language_code = 'en-US'
+    else:
+        voice_id = 'Vicki'
+        language_code = 'de-DE'
+
     # Use Amazon Polly to synthesize speech with neural voice
     response = polly_client.synthesize_speech(
         Text=text,
         OutputFormat='mp3',
-        VoiceId='Vicki',  # Choose a neural voice suitable for German (example: 'Vicki' is a standard voice, use a neural voice ID here)
-        LanguageCode='de-DE',
-        Engine='neural'  # Specify 'neural' to use neural voice
+        VoiceId=voice_id,
+        LanguageCode=language_code,
+        Engine='neural'
     )
 
     # Save the MP3 file to a temporary location
@@ -316,7 +328,7 @@ async def describe_image(image: Image.Image) -> str:
     description = processor_describe.decode(out[0], skip_special_tokens=True)
     return description
 
-async def process_photo(update: Update, context: CallbackContext):
+async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     photo = update.message.photo[-1]
     file = await photo.get_file()  # Verwende await, um das File-Objekt zu erhalten
@@ -370,7 +382,7 @@ async def summarize_descriptions(descriptions: list) -> str:
     completion = await client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[
-                {"role": "system", "content": "Du bist die Augen (Sinne) eines anderen Agenten. Der folgende Text ist eine Beschreibung von dem was du siehst, sag was du siehst und fass alles zusammen."},
+                {"role": "system", "content": "Ein Video wurde in seine einzelteile (als Bilder) aufgeteilt und jedes Bild erhaelt eine Zusammenfassung. Vereine alle Beschreibungen in ein gesamtheitliches Bild. Entferne Wiederholungen und Redundanzen - da es ein Video war. Du bist die Augen (Sinne) eines anderen Agenten. Der folgende Text ist eine Beschreibung von dem was du siehst, sag was du siehst und fass alles zusammen."},
                 {"role": "user", "content": combined_descriptions}
             ],
     )
@@ -573,30 +585,114 @@ async def extract_text_html(url: str) -> str:
 def extract_text_from_image(image):
     return pytesseract.image_to_string(image)
 
-async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = update.message.text
-    urls = extract_urls(message_text)
-
-    if urls:
-        responses = []
-        for url in urls:
-            screenshot_path = '/path/to/screenshot.png'
-            summary = await extract_text_html(url)
-            response = await generate_response_from_text(summary)
-            responses.append(f"URL: {url}\nResponse: {response}")
-            print("URL FOUND")
-
-        # Send back the responses
-        await update.message.reply_text("\n\n".join(responses))
-    else:
-        # Handle regular messages
-        await update.message.reply_text("No URLs found in the message.")
-
 
 # Define a function to extract URLs from a message
 def extract_urls(message: str) -> list:
     url_pattern = re.compile(r'https?://\S+')
     return url_pattern.findall(message)
+
+# Payment command
+async def pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+    chat_id = update.effective_chat.id
+
+    # Retrieve user_id from MongoDB
+    user_data = users_collection.find_one({"chat_id": chat_id})
+    user_id = user_data.get('user_id', 'unknown') if user_data else 'unknown'
+
+    # Create a payment intent
+    payment_intent = stripe.PaymentIntent.create(
+        amount=999,
+        currency='eur',
+        metadata={'user_id': user_id}
+    )
+    # Print payment intent for debugging
+    print("Created Payment Intent:", payment_intent)
+    # Send payment link
+    keyboard = [[InlineKeyboardButton("Pay Now", url=payment_intent['charges']['data'][0]['receipt_url'])]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text('Please click the button below to pay:', reply_markup=reply_markup)
+
+# Payment success handler
+async def payment_success(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(text="Payment successful! You can now continue chatting.")
+
+async def start_with_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    stripe.api_key = os.getenv("STRIPE_API_KEY")
+    user_id = update.effective_user.id
+
+    welcome_message = f"""🧠 Der erste KI Life Coach, der 24/7 verfügbar ist und von Tausenden von Menschen genutzt wird
+
+🧑‍⚖️ Haftungsausschluss
+Wenn du fortfährst, erklärst du dich damit einverstanden, dass ich ein KI-Lebenscoach bin. Ich bin kein lizenzierter Psychologe, Therapeut oder Gesundheitsexperte und ersetze nicht die Betreuung durch solche Personen. Ich übernehme keine Verantwortung für die Ergebnisse deiner Handlungen und jeglichen Schaden, den du als Folge der Nutzung oder Nichtnutzung der verfügbaren Informationen erleidest. Lass dein Urteilsvermögen und deine Sorgfaltspflicht walten,
+bevor du eine der vorgeschlagenen Maßnahmen oder Pläne umsetzt. Nicht nutzen, wenn du dich oder andere in Gefahr siehst, sondern wende dich an Fachpersonal unter der Telefonseelsorge, die für eine anonyme, kostenlose Beratung zu jeder Tages- und Nachtzeit unter den bundesweiten Telefonnummern 0800 1110111 oder 0800 1110222 erreichbar ist.
+
+✅ Ändere deine negativen Gedanken 💭.
+✅ Werden aktiv und löse dich aus der Sackgasse 💥
+✅ Mach dich fit, das hilft deinem Geist 🏋️
+✅ Sprich mit mir über deinen Tag 🗣️
+✅ Fühle dich besser, indem du nach dir schaust 🤗
+
+Du kannst
+🗣️ mir eine Sprachnachricht schicken und ich werde per Stimme antworten
+🤳 Schick mir eine Videonachricht und ich antworte per Stimme
+💬 Schick mir eine Chat-Nachricht und ich antworte per Text
+📸 Schick mir ein Foto von deinem Tag und wir können darüber reden
+🔎 Schick mir eine URL und wir können darüber diskutieren
+
+Schreiben jederzeit /reset, um den gesamten Konversationsverlauf von unseren Servern zu löschen
+
+💡 Rückmeldung
+Hast du Feedback, Ideen und Fehler für mich? https://tbd.xyz."""
+
+    #await context.bot.send_message(chat_id=update.effective_chat.id, text=welcome_message)
+
+    try:
+        # Create a Checkout Session
+
+        session = stripe.checkout.Session.create(
+            line_items=[
+                {
+                    'price': 'price_1PiVtjCr95YGcOEyvJlJiPo6',  # Use the price ID for the product with the image
+                    'quantity': 1,
+                },
+            ],
+            mode='subscription',
+            success_url='https://yourdomain.com/success?session_id={CHECKOUT_SESSION_ID}',
+            cancel_url='https://yourdomain.com/cancel',
+            subscription_data={
+                'metadata': {
+                    'user_id': user_id,  # Store user ID in metadata
+                }
+                }
+            )
+
+        # Create an inline keyboard with the payment button
+        keyboard = [[InlineKeyboardButton("✨ Gespräch fortsetzen", url=session.url)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Send message with inline button
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=welcome_message,
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f'There was an issue creating the payment. Please try again later. {e}'
+        )
+
+# Function to handle pre-checkout queries
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.pre_checkout_query
+    if query.invoice_payload != 'Custom-Payload':
+        await query.answer(ok=False, error_message="Something went wrong...")
+    else:
+        await query.answer(ok=True)
 
 
 
@@ -610,8 +706,10 @@ if __name__ == '__main__':
     reset_handler = CommandHandler('reset', reset)
     photo_handler = MessageHandler(filters.PHOTO, process_photo)
 
-
     application.add_handler(start_handler)
+    application.add_handler(CommandHandler("pay", pay))
+    application.add_handler(CallbackQueryHandler(payment_success, pattern='^payment_success$'))
+    application.add_handler(PreCheckoutQueryHandler(precheckout_callback))  # Add the handler for pre-checkout queries
     application.add_handler(echo_handler)
     application.add_handler(voice_handler)
     application.add_handler(video_handler)
