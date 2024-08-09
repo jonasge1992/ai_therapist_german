@@ -1,4 +1,5 @@
-dotfiles
 /archive
 /model
 raw_data
+/old
+./olds
