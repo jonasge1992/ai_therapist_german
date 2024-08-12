@@ -10,3 +10,29 @@ This repository hosts an AI-driven therapist chatbot for Telegram, supporting bo
 - **RAG System**: Enhanced response accuracy via retrieved data.
 - **OpenAI Integration**: GPT for text, Whisper for voice-to-text, TTS1 for text-to-speech.
 - **Stripe Integration**: Handles payments for premium features.
+
+## Setup
+
+1. Clone the repository:
+    ```bash
+    git clone https://github.com/jonasge1992/ai_therapist_german.git
+    cd ai_therapist_german
+    ```
+
+2. Install dependencies:
+    ```bash
+    pyenv install 3.10.6
+    pyenv local 3.10.6
+    pip install -r requirements.txt
+    ```
+
+3. Configure environment variables:
+    ```bash
+    cp .env.example .env
+    # Add your API keys and configuration details
+    ```
+
+4. Run the bot:
+    ```bash
+    python main.py
+    ```
