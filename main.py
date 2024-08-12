@@ -1,11 +1,9 @@
-from telegram import Update
 from telegram.ext import ApplicationBuilder
 from config import config
 from handlers import start, echo, process_video_message, process_voice_message, process_photo, reset
 from telegram.ext import (
     ApplicationBuilder, CommandHandler,
-    CallbackQueryHandler, MessageHandler,
-    filters, ContextTypes, PreCheckoutQueryHandler
+    MessageHandler,filters
 )
 from models import *
 

@@ -1,5 +1,4 @@
 import aiomysql
-import os
 from config import config
 import stripe
 import json

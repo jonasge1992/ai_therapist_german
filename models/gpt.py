@@ -1,30 +1,12 @@
-from openai import AsyncOpenAI
 from config import config
 from models import get_subscription_status, get_message_count, update_message_count
 from handlers import start
-import json
-import asyncio
-import os
-import subprocess
-import tempfile
-import uuid
-from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import MessageHandler, filters, ContextTypes
+from telegram.ext import ContextTypes
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
-from langchain_core.chat_history import InMemoryChatMessageHistory, BaseChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from openai import OpenAI
-import ffmpeg
-from langchain import hub
-from langchain.agents import AgentExecutor, Tool
-from langchain_community.chat_message_histories import RedisChatMessageHistory
-from langchain_community.utilities import SerpAPIWrapper
 from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_openai import OpenAI
-from langchain_community.utilities import SQLDatabase
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 
 mysql_uri = config["MYSQL_URI"]

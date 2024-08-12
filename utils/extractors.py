@@ -2,7 +2,34 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from langdetect import detect
-import pytesseract  # For OCR from images
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+import nltk
+
+# Ensure that NLTK resources are downloaded
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+
+
+async def clean_text(text: str, language: str) -> str:
+    if language == 'en':
+        stop_words = set(stopwords.words('english'))
+    elif language == 'de':
+        stop_words = set(stopwords.words('german'))
+    else:
+        stop_words = set()  # If language is not supported, don't remove stop words
+
+    lemmatizer = WordNetLemmatizer() if language == 'en' else None
+    tokens = word_tokenize(text.lower()) if language == 'en' else text.lower().split()
+    cleaned_tokens = [
+        lemmatizer.lemmatize(word)
+        for word in tokens
+        if word.isalnum() and word not in stop_words
+    ] if lemmatizer else [word for word in tokens if word.isalnum() and word not in stop_words]
+
+    return ' '.join(cleaned_tokens)
 
 # Function to extract text from a given URL
 async def extract_text_html(url: str) -> str:
@@ -40,10 +67,6 @@ async def extract_text_html(url: str) -> str:
         return f"Error fetching URL: {e}"
     except Exception as e:
         return f"Error processing content: {e}"
-
-# Function to extract text from an image
-def extract_text_from_image(image):
-    return pytesseract.image_to_string(image)
 
 # Function to extract URLs from a message
 def extract_urls(message: str) -> list:

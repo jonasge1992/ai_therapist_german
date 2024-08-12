@@ -1,15 +1,5 @@
-import soundfile as sf
-import librosa
 from telegram import Update
-from telegram.ext import ContextTypes
-import io
-import boto3
 import os
-import tempfile
-from pydub import AudioSegment
-import logging
-import speech_recognition as sr
-from langdetect import detect
 from openai import OpenAI
 from telegram.ext import CallbackContext
 from config import config

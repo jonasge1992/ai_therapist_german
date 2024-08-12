@@ -1,20 +1,9 @@
-import soundfile as sf
-import librosa
 from telegram import Update
-from telegram.ext import ContextTypes
 from models import *
 from handlers import start
-import io
-import boto3
-import os
 import tempfile
-from pydub import AudioSegment
-import logging
-import speech_recognition as sr
-from langdetect import detect
 from telegram.ext import CallbackContext
 import subprocess
-import ffmpeg
 
 async def process_voice_message(update: Update, context: CallbackContext):
     user_id = update.effective_user.id  # Get the ID of the user sending the message

@@ -1,14 +1,9 @@
 from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration
 from telegram import Update
-from telegram.ext import MessageHandler, filters, ContextTypes
+from telegram.ext import ContextTypes
 from models import *
 from handlers import start
 import io
-import tempfile
-import cv2
-from fer import FER
-import torch
 
 # Function to process photo messages
 async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -1,42 +1,56 @@
 from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration
 from telegram import Update
-from telegram.ext import MessageHandler, filters, ContextTypes
+from telegram.ext import ContextTypes
 from models import *
-import io
 import tempfile
 import cv2
-from fer import FER
-import torch
 # Import transformer models and OpenAI API
-from transformers import (
-    DetrImageProcessor,
-    DetrForObjectDetection,
-    BlipProcessor,
-    BlipForConditionalGeneration
-)
+
 from openai import AsyncOpenAI
 from config import config
-
-# Load object detection models
-model_name = "facebook/detr-resnet-50"
-processor = DetrImageProcessor.from_pretrained(model_name)
-model = DetrForObjectDetection.from_pretrained(model_name)
-
-# Load image captioning models
-processor_describe = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-model_describe = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+import base64
 
 client = AsyncOpenAI(api_key=config["OPENAI_API_KEY"])
 
-# Function to describe an image using the image captioning model
+open_ai_key = config["OPENAI_API_KEY"]
+
+# Function to encode the image
+def encode_image(image_path):
+  with open(image_path, "rb") as image_file:
+    return base64.b64encode(image_file.read()).decode('utf-8')
+
 async def describe_image(image: Image.Image) -> str:
-    inputs = processor_describe(images=image, return_tensors="pt")
-    out = model_describe.generate(**inputs)
-    description = processor_describe.decode(out[0], skip_special_tokens=True)
-    return description
+
+    # Create a temporary file to save the image
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+        image.save(tmp_file, format="JPEG")
+        image_path = tmp_file.name
+
+    # Getting the base64 string
+    base64_image = encode_image(image_path)
+
+    response = await client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[
+        {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "What’s in this image?"},
+            {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{base64_image}",
+                "detail":"low"
+            },
+            },
+        ],
+        }
+    ],
+    max_tokens=300,
+    )
 
 
+    return str(response.choices[0])
 
 
 # Function to extract frames from a video for analysis
@@ -55,9 +69,7 @@ async def extract_frames_from_video(video_path: str, frame_interval: int):
         if frame_number % frame_interval == 0:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(frame_rgb)
-            inputs = processor_describe(images=image, return_tensors="pt")
-            outputs = model_describe.generate(**inputs)
-            description = processor_describe.decode(outputs[0], skip_special_tokens=True)
+            description = await describe_image(image)
             descriptions.append(description)
 
     cap.release()
@@ -87,9 +99,6 @@ async def process_video_message(update: Update, context: ContextTypes.DEFAULT_TY
         await start_with_payment(update, context)
         return
 
-    # Initialize the FER detector
-    detector = FER()
-
     file = await update.message.video.get_file()
     video_bytearray = await file.download_as_bytearray()
 
@@ -102,11 +111,11 @@ async def process_video_message(update: Update, context: ContextTypes.DEFAULT_TY
     audio_path = extract_audio(video_path)
 
     # Transcribe the audio
-    transcript = recognize_speech_from_path(audio_path)
+    transcript = speech_to_text_conversion(audio_path)
 
     # Extract frames and describe them
     fps = int(cv2.VideoCapture(video_path).get(cv2.CAP_PROP_FPS))
-    frame_interval = fps
+    frame_interval = 1.5*fps
     try:
         descriptions = await extract_frames_from_video(video_path, frame_interval)
     except ValueError as e:
@@ -136,34 +145,11 @@ async def process_video_message(update: Update, context: ContextTypes.DEFAULT_TY
         os.remove(audio_path)
         return
 
-    # Convert the frame to PIL Image format for object detection
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image = Image.fromarray(frame_rgb)
-    inputs = processor(images=image, return_tensors="pt")
-    outputs = model(**inputs)
-    target_sizes = torch.tensor([image.size[::-1]])
-    results = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.9)[0]
-    detected_objects = [model.config.id2label[label_id.item()] for label_id in results["labels"]]
-
-    # Perform emotion detection on the last frame
-    emotion_data = detector.detect_emotions(frame)
-    if emotion_data:
-        first_entry = emotion_data[0]
-        emotions = first_entry['emotions']
-        if emotions:
-            emotion = max(emotions, key=emotions.get)
-            score = emotions[emotion]
-        else:
-            emotion = "Unbekannt"
-            score = 0
-    else:
-        emotion = "Unbekannt"
-        score = 0
 
     # Create a response
     response_text = f"""Bitte reagiere auf das, was du im Video siehst und hörst.
     Der Patient hat dir ein Video geschickt. Du siehst folgendes: {summary}.
-    Du erkennst folgende Emotion: {emotion} (Score: {score}). Wenn du nur eine Person siehst - gehe immer davon aus dass es der Patient ist.
+    Wenn du nur eine Person siehst - gehe immer davon aus dass es der Patient ist.
 
     Außerdem verstehst du, was der Patient sagt. Du hörst: {transcript}.
 
